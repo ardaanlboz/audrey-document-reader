@@ -2,11 +2,14 @@
 
 import { useState } from "react";
 import type { TTSState, TTSControls } from "@/hooks/useTTS";
+import type { HighlightMode } from "@/types/highlight";
 
 interface PlayerControlsProps {
   state: TTSState;
   controls: TTSControls;
   fileName: string;
+  highlightMode: HighlightMode;
+  onHighlightModeChange: (mode: HighlightMode) => void;
   onBack: () => void;
 }
 
@@ -22,6 +25,8 @@ export default function PlayerControls({
   state,
   controls,
   fileName,
+  highlightMode,
+  onHighlightModeChange,
   onBack,
 }: PlayerControlsProps) {
   const [showVoices, setShowVoices] = useState(false);
@@ -42,6 +47,12 @@ export default function PlayerControls({
     } else {
       controls.pause();
     }
+  };
+
+  const toggleHighlightMode = () => {
+    onHighlightModeChange(
+      highlightMode === "stable" ? "moving" : "stable"
+    );
   };
 
   return (
@@ -320,6 +331,18 @@ export default function PlayerControls({
               title="Playback speed"
             >
               {state.rate}x
+            </button>
+
+            <button
+              onClick={toggleHighlightMode}
+              className={`px-3 py-1.5 rounded-xl transition-colors text-sm font-medium min-w-[78px] ${
+                highlightMode === "moving"
+                  ? "bg-accent/10 text-accent-light hover:bg-accent/15"
+                  : "hover:bg-surface-hover text-text-secondary"
+              }`}
+              title="Toggle highlight mode"
+            >
+              {highlightMode === "moving" ? "Moving" : "Stable"}
             </button>
           </div>
 

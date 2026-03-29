@@ -2,10 +2,12 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import type { WordChangeCallback } from "@/hooks/useTTS";
+import type { HighlightMode } from "@/types/highlight";
 
 interface TextViewerProps {
   pageIndex: number;
   text: string;
+  highlightMode: HighlightMode;
   onWordClick: (wordIndex: number) => void;
   onWordChange: (cb: WordChangeCallback) => void;
 }
@@ -42,6 +44,7 @@ function tokenize(text: string): WordToken[] {
 export default function TextViewer({
   pageIndex,
   text,
+  highlightMode,
   onWordClick,
   onWordChange,
 }: TextViewerProps) {
@@ -93,7 +96,6 @@ export default function TextViewer({
         return;
       }
 
-      const previousWordIndex = prevWordIdxRef.current;
       const previousSentenceRange = prevSentenceRangeRef.current;
       const sameSentence =
         previousSentenceRange &&
@@ -101,15 +103,34 @@ export default function TextViewer({
         previousSentenceRange[0] === event.sentenceRange[0] &&
         previousSentenceRange[1] === event.sentenceRange[1];
 
-      if (sameSentence) {
-        if (previousWordIndex >= 0) {
-          wordEls[previousWordIndex]?.classList.remove("word-highlight");
-          wordEls[previousWordIndex]?.classList.add("sentence-highlight");
-        }
+      if (highlightMode === "moving") {
+        const previousWordIndex = prevWordIdxRef.current;
 
-        wordEls[event.wordIndex]?.classList.remove("sentence-highlight");
-        wordEls[event.wordIndex]?.classList.add("word-highlight");
-      } else {
+        if (sameSentence) {
+          if (previousWordIndex >= 0) {
+            wordEls[previousWordIndex]?.classList.remove("word-highlight");
+            wordEls[previousWordIndex]?.classList.add("sentence-highlight");
+          }
+
+          wordEls[event.wordIndex]?.classList.remove("sentence-highlight");
+          wordEls[event.wordIndex]?.classList.add("word-highlight");
+        } else {
+          clearHighlights();
+
+          if (event.sentenceRange) {
+            for (
+              let index = event.sentenceRange[0];
+              index <= event.sentenceRange[1];
+              index++
+            ) {
+              if (index === event.wordIndex) continue;
+              wordEls[index]?.classList.add("sentence-highlight");
+            }
+          }
+
+          wordEls[event.wordIndex]?.classList.add("word-highlight");
+        }
+      } else if (!sameSentence) {
         clearHighlights();
 
         if (event.sentenceRange) {
@@ -118,18 +139,21 @@ export default function TextViewer({
             index <= event.sentenceRange[1];
             index++
           ) {
-            if (index === event.wordIndex) continue;
             wordEls[index]?.classList.add("sentence-highlight");
           }
+        } else {
+          wordEls[event.wordIndex]?.classList.add("sentence-highlight");
         }
-
-        wordEls[event.wordIndex]?.classList.add("word-highlight");
       }
 
       prevWordIdxRef.current = event.wordIndex;
       prevSentenceRangeRef.current = event.sentenceRange;
 
-      const activeWord = wordEls[event.wordIndex];
+      const anchorIndex =
+        highlightMode === "moving"
+          ? event.wordIndex
+          : event.sentenceRange?.[0] ?? event.wordIndex;
+      const activeWord = wordEls[anchorIndex];
       const now = Date.now();
 
       if (activeWord && now - lastScrollTimeRef.current > 800) {
@@ -153,7 +177,7 @@ export default function TextViewer({
       clearHighlights();
       wordElsRef.current = [];
     };
-  }, [onWordChange, pageIndex, tokens]);
+  }, [highlightMode, onWordChange, pageIndex, tokens]);
 
   useEffect(() => {
     const container = containerRef.current;

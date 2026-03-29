@@ -5,10 +5,13 @@ import FileUpload from "@/components/FileUpload";
 import TextViewer from "@/components/TextViewer";
 import PlayerControls from "@/components/PlayerControls";
 import { useTTS } from "@/hooks/useTTS";
+import type { HighlightMode } from "@/types/highlight";
 
 export default function Home() {
   const [pages, setPages] = useState<string[]>([]);
   const [fileName, setFileName] = useState("");
+  const [highlightMode, setHighlightMode] =
+    useState<HighlightMode>("stable");
   const [state, controls] = useTTS(pages);
 
   const handleTextExtracted = useCallback(
@@ -73,6 +76,7 @@ export default function Home() {
       <TextViewer
         pageIndex={state.currentPageIndex}
         text={currentPageText}
+        highlightMode={highlightMode}
         onWordClick={(wordIndex) =>
           controls.seekToPageWord(state.currentPageIndex, wordIndex)
         }
@@ -84,6 +88,8 @@ export default function Home() {
         state={state}
         controls={controls}
         fileName={fileName}
+        highlightMode={highlightMode}
+        onHighlightModeChange={setHighlightMode}
         onBack={handleBack}
       />
     </div>

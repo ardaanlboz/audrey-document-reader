@@ -90,6 +90,8 @@ interface KokoroSentencePlayback {
   location: PlaybackLocation;
   sentence: SentenceInfo;
   duration: number;
+  speechStartOffset: number;
+  speechDuration: number;
   checkpoints: KokoroWordCheckpoint[];
 }
 
@@ -164,6 +166,12 @@ const GRADE_SCORES: Record<string, number> = {
   "F+": 0,
   F: -1,
 };
+
+interface RawAudioLike {
+  audio?: Float32Array;
+  data?: Float32Array;
+  sampling_rate?: number;
+}
 
 function clamp(value: number, min: number, max: number): number {
   if (max < min) return min;
@@ -457,14 +465,85 @@ function selectPreferredSystemVoice(
   return ordered[0] ?? null;
 }
 
-function getRawAudioDurationSeconds(audio: {
-  audio?: Float32Array;
-  data?: Float32Array;
-  sampling_rate?: number;
-}): number {
-  const samples = audio.audio ?? audio.data ?? new Float32Array();
+function getRawAudioSamples(audio: RawAudioLike): Float32Array {
+  return audio.audio ?? audio.data ?? new Float32Array();
+}
+
+function getRawAudioDurationSeconds(audio: RawAudioLike): number {
+  const samples = getRawAudioSamples(audio);
   const samplingRate = audio.sampling_rate ?? 24000;
   return samples.length > 0 ? samples.length / samplingRate : 0;
+}
+
+function detectRawAudioSpeechWindow(audio: RawAudioLike): {
+  startTime: number;
+  duration: number;
+} {
+  const samples = getRawAudioSamples(audio);
+  const samplingRate = audio.sampling_rate ?? 24000;
+  const totalDuration = getRawAudioDurationSeconds(audio);
+
+  if (samples.length === 0 || samplingRate <= 0 || totalDuration <= 0) {
+    return {
+      startTime: 0,
+      duration: totalDuration,
+    };
+  }
+
+  const windowSize = Math.max(256, Math.floor(samplingRate * 0.02));
+  const windowCount = Math.ceil(samples.length / windowSize);
+  const levels = new Float32Array(windowCount);
+  let maxLevel = 0;
+
+  for (let windowIndex = 0; windowIndex < windowCount; windowIndex++) {
+    const start = windowIndex * windowSize;
+    const end = Math.min(start + windowSize, samples.length);
+    let total = 0;
+
+    for (let sampleIndex = start; sampleIndex < end; sampleIndex++) {
+      total += Math.abs(samples[sampleIndex]);
+    }
+
+    const level = total / Math.max(end - start, 1);
+    levels[windowIndex] = level;
+    maxLevel = Math.max(maxLevel, level);
+  }
+
+  const threshold = Math.max(maxLevel * 0.08, 0.0025);
+  let firstActiveWindow = -1;
+  let lastActiveWindow = -1;
+
+  for (let windowIndex = 0; windowIndex < windowCount; windowIndex++) {
+    if (levels[windowIndex] < threshold) continue;
+
+    if (firstActiveWindow === -1) {
+      firstActiveWindow = windowIndex;
+    }
+
+    lastActiveWindow = windowIndex;
+  }
+
+  if (firstActiveWindow === -1 || lastActiveWindow === -1) {
+    return {
+      startTime: 0,
+      duration: totalDuration,
+    };
+  }
+
+  const prerollWindows = 1;
+  const postrollWindows = 2;
+  const startWindow = Math.max(0, firstActiveWindow - prerollWindows);
+  const endWindow = Math.min(windowCount, lastActiveWindow + 1 + postrollWindows);
+  const startTime = (startWindow * windowSize) / samplingRate;
+  const endTime = Math.min(totalDuration, (endWindow * windowSize) / samplingRate);
+
+  return {
+    startTime,
+    duration: Math.max(
+      endTime - startTime,
+      Math.min(totalDuration, 0.08)
+    ),
+  };
 }
 
 function estimateSyllables(word: string): number {
@@ -484,6 +563,11 @@ function estimateKokoroWordWeight(token: string): number {
   const normalized = token.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, "");
   const lettersOnly = normalized.replace(/[^A-Za-z]/g, "");
   const digitsOnly = normalized.replace(/\D/g, "");
+  const hasSoftPause = /[,;:](?:["'”’)\]]*)$/.test(token);
+  const hasDashPause = /[—–-](?:["'”’)\]]*)$/.test(token);
+  const hasEllipsisPause = /(?:\.{3}|…)(?:["'”’)\]]*)$/.test(token);
+  const hasHardStop =
+    !hasEllipsisPause && /[.!?](?:["'”’)\]]*)$/.test(token);
 
   let weight = 0.9;
 
@@ -500,16 +584,18 @@ function estimateKokoroWordWeight(token: string): number {
     weight += Math.min(normalized.length, 6) * 0.12;
   }
 
-  if (/[,;:]/.test(token)) {
+  if (hasSoftPause) {
+    weight += 0.75;
+  }
+
+  if (hasDashPause) {
     weight += 0.45;
   }
 
-  if (/[—–-]/.test(token)) {
-    weight += 0.3;
-  }
-
-  if (/[.!?]/.test(token)) {
-    weight += 0.85;
+  if (hasEllipsisPause) {
+    weight += 1.35;
+  } else if (hasHardStop) {
+    weight += 1.1;
   }
 
   if (/["'”’)\]]$/.test(token)) {
@@ -1039,8 +1125,13 @@ export function useTTS(pages: string[]): [TTSState, TTSControls] {
     if (!playback || !audio) return;
 
     const ratio =
-      playback.duration > 0
-        ? clamp(audio.currentTime / playback.duration, 0, 0.999)
+      playback.speechDuration > 0
+        ? clamp(
+            (audio.currentTime - playback.speechStartOffset) /
+              playback.speechDuration,
+            0,
+            0.999
+          )
         : 0;
     const checkpoint =
       playback.checkpoints.find((item) => ratio < item.endRatio) ??
@@ -1098,23 +1189,6 @@ export function useTTS(pages: string[]): [TTSState, TTSControls] {
       const sentence = page.sentences[nextLocation.sentenceIndex];
 
       currentLocationRef.current = nextLocation;
-      setActivePage(nextLocation.pageIndex);
-      updateProgressForWord(
-        nextLocation.pageIndex,
-        sentence.wordStartIndex,
-        true
-      );
-
-      const sentenceRange: [number, number] = [
-        sentence.wordStartIndex,
-        sentence.wordEndIndex,
-      ];
-
-      notifyWordChange({
-        pageIndex: nextLocation.pageIndex,
-        wordIndex: sentence.wordStartIndex,
-        sentenceRange,
-      });
 
       setIsEngineLoading(true);
       setEngineMessage("Generating Kokoro audio...");
@@ -1129,6 +1203,7 @@ export function useTTS(pages: string[]): [TTSState, TTSControls] {
       const audio = ensureAudioElement();
       const blobUrl = URL.createObjectURL(rawAudio.toBlob());
       const duration = getRawAudioDurationSeconds(rawAudio);
+      const speechWindow = detectRawAudioSpeechWindow(rawAudio);
 
       stopKokoroPlayback();
       activeKokoroUrlRef.current = blobUrl;
@@ -1136,6 +1211,8 @@ export function useTTS(pages: string[]): [TTSState, TTSControls] {
         location: nextLocation,
         sentence,
         duration,
+        speechStartOffset: speechWindow.startTime,
+        speechDuration: speechWindow.duration,
         checkpoints: buildKokoroWordCheckpoints(page, sentence),
       };
 
@@ -1191,6 +1268,8 @@ export function useTTS(pages: string[]): [TTSState, TTSControls] {
       isPausedRef.current = false;
       setIsPlaying(true);
       setIsPaused(false);
+      setActivePage(nextLocation.pageIndex);
+      updateProgressForWord(nextLocation.pageIndex, sentence.wordStartIndex, true);
       setIsEngineLoading(false);
       setEngineMessage(null);
       startTimer();
@@ -1202,7 +1281,6 @@ export function useTTS(pages: string[]): [TTSState, TTSControls] {
       ensureKokoroReady,
       fallbackToSystem,
       finishPlayback,
-      notifyWordChange,
       setActivePage,
       startKokoroWordTracking,
       startTimer,
