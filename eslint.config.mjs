@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated vendor asset copied to public for pdf.js worker loading.
+    "public/pdf.worker.min.mjs",
   ]),
 ]);
 
